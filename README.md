@@ -1,10 +1,16 @@
 # Raid Helper
 
-NosBoost mod that marks raid levers and mini bosses on the minimap.
+A NosBoost mod that marks raid levers and mini bosses on the minimap.
 
-- Levers are the objects with vnum 1135 (1136 once pulled). Only levers it has learned as correct are marked: a lever is correct when the raid's lever counter (`raidmbf` 4th field, levers left) drops right before the lever flips to 1136. A flip without a drop is a trap. Learned levers are saved in `mods\RaidHelper\levers.txt` as `width height x y good bad`, keyed by the room's grid size because raid map ids change every run. The first run of a room shows no levers.
-- Mini bosses are the monsters whose `in` packet ends with the minimap mark flag (`1`). Extra monster vnums can be listed in `mods\RaidHelper.ini` as `ExtraBossVnums=283,333`.
-- Marks follow `mv`, and are removed on death (`su`), on `out` and on map change.
-- F9 opens the settings: show levers, show bosses, the icon for each, and a count on the minimap.
+## What it does
 
-Needs a NosBoost runtime with the `mv` packet, the raw `in` fields and the map size in `TickContext`.
+- Mini bosses get a mark on the minimap that follows them while they move.
+- Levers get a mark too, but only the correct ones. The mod learns which lever is correct by watching the raid's lever counter. A lever that doesn't lower the counter is a trap and is never marked.
+- What it learns is saved, so the next time you do the same room the levers show up. The first time you do a room, no levers are shown.
+- F9 opens the settings: show levers, show bosses, pick the icon for each, and show a count on the minimap.
+
+Learned levers are saved in `mods\RaidHelper\levers.txt`. Extra monsters to mark as bosses can be added in `mods\RaidHelper.ini` as `ExtraBossVnums=283,333`.
+
+## Install
+
+Download the DLL from this repo's Releases and put it in the game's `mods` folder. NosBoost loads it by itself. Open it from the NosBoost mods menu (F9).
