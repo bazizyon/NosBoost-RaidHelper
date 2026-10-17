@@ -1,26 +1,10 @@
-# NosBoost ModKit
+# Raid Helper
 
-This repo is the starting point for making one mod for NosTale that runs on NosBoost.
+NosBoost mod that marks raid levers and mini bosses on the minimap.
 
-NosBoost is a small system that runs inside the game. It can load extra DLL files ("mods") while the game is running. Fork this repo to make your own mod.
+- Levers are the objects with vnum 1135 (1136 once pulled). Only levers it has learned as correct are marked: a lever is correct when the raid's lever counter (`raidmbf` 4th field, levers left) drops right before the lever flips to 1136. A flip without a drop is a trap. Learned levers are saved in `mods\RaidHelper\levers.txt` as `width height x y good bad`, keyed by the room's grid size because raid map ids change every run. The first run of a room shows no levers.
+- Mini bosses are the monsters whose `in` packet ends with the minimap mark flag (`1`). Extra monster vnums can be listed in `mods\RaidHelper.ini` as `ExtraBossVnums=283,333`.
+- Marks follow `mv`, and are removed on death (`su`), on `out` and on map change.
+- F9 opens the settings: show levers, show bosses, the icon for each, and a count on the minimap.
 
-## What is inside
-
-- `ModContract.h` — this is the toolbox. It has all the functions and types a mod is allowed to use, like creating a widget on screen or reading a packet from the server.
-- `ExampleMod/` — an example mod that already builds and runs. It shows how to use the tools in `ModContract.h`. You can rename it, change it, or replace it with your own code.
-
-## How to make your mod
-
-1. Use this repository as template.
-2. Open it in CLion (or any CMake-based IDE) and build it. You do not need to download anything else by hand. The build automatically fetches the SDK and ImGui for you.
-3. Rename the `ExampleMod` folder and its `.cpp` file to your mod's name. Open the top-level `CMakeLists.txt` and change every place it says `ExampleMod` to your new name (the file names, the `add_library` name, and the target name in `target_include_directories` / `target_compile_options` / `set_target_properties`).
-4. Open your mod's `.cpp` file and write your own code. Use the tools from `ModContract.h` to make widgets (buttons, labels, panels) or to read packets sent by the server.
-5. Build your mod or push a version with a tag in form v* (v0.1 for example). It compiles into a DLL and is placed straight into the game's `mods` folder or in GitHub releases. The next time NosBoost starts, it finds your DLL and loads it automatically.
-
-## What the SDK is for
-
-While you write your mod, you will use class and packet definitions that come from the SDK repo (`NosSDK_-NosBoost-`). You do not need to set this up yourself — the build fetches it for you. It gives you things like the exact shape of a widget or a packet, so your mod can read and change them safely.
-
-## A note for later
-
-If a mod is not working, first check that the DLL is really in the game's `mods` folder, and that NosBoost's overlay shows your mod's name in its list. Most problems are caused by a stale build being copied instead of a fresh one.
+Needs a NosBoost runtime with the `mv` packet, the raw `in` fields and the map size in `TickContext`.

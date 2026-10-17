@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.1)
-project(NosBoostModKit)
+project(RaidHelper)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,16 +20,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(imgui)
 
-add_library(ExampleMod SHARED
-        ExampleMod/ExampleMod.cpp
+add_library(RaidHelper SHARED
+        RaidHelper/RaidHelper.cpp
+        RaidHelper/Memory.cpp
+        RaidHelper/GroundEffects.cpp
+        RaidHelper/EffectCatalog.cpp
         WidgetKit/WidgetKit.cpp
+        WidgetKit/Dropdown.cpp
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_draw.cpp
         ${imgui_SOURCE_DIR}/imgui_tables.cpp
         ${imgui_SOURCE_DIR}/imgui_widgets.cpp
 )
 
-target_include_directories(ExampleMod PRIVATE
+target_include_directories(RaidHelper PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/WidgetKit
         ${nosboost_sdk_SOURCE_DIR}/classes
@@ -40,10 +44,10 @@ target_include_directories(ExampleMod PRIVATE
         ${imgui_SOURCE_DIR}
 )
 
-target_compile_options(ExampleMod PRIVATE /EHsc /MP)
+target_compile_options(RaidHelper PRIVATE /EHsc /MP)
 
 if(NOT DEFINED ENV{CI})
-    set_target_properties(ExampleMod PROPERTIES
+    set_target_properties(RaidHelper PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "C:/Program Files (x86)/Nostale/mods"
     )
 endif()
