@@ -25,6 +25,10 @@ add_library(RaidHelper SHARED
         RaidHelper/Memory.cpp
         RaidHelper/GroundEffects.cpp
         RaidHelper/EffectCatalog.cpp
+        RaidHelper/MapImage.cpp
+        RaidHelper/MapOverlay.cpp
+        RaidHelper/GameCall.cpp
+        RaidHelper/GameHint.cpp
         WidgetKit/WidgetKit.cpp
         WidgetKit/Dropdown.cpp
         ${imgui_SOURCE_DIR}/imgui.cpp

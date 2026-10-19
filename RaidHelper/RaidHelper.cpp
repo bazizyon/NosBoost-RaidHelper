@@ -20,6 +20,9 @@
 #include "RaidMbfPacket.h"
 #include "GroundEffects.h"
 #include "EffectCatalog.h"
+#include "MapImage.h"
+#include "MapOverlay.h"
+#include "GameHint.h"
 
 #include <algorithm>
 #include <atomic>
@@ -77,7 +80,7 @@ namespace {
     constexpr int DefaultBossIcon = 2;
 
     constexpr uint16_t WindowWidth = 350;
-    constexpr uint16_t WindowHeight = 296;
+    constexpr uint16_t WindowHeight = 450;
     constexpr int16_t Pad = 14;
     constexpr int16_t TextNudge = -1;
     constexpr int16_t DropdownArrow = 17;
@@ -90,6 +93,12 @@ namespace {
     constexpr int16_t StatusTop = 218;
     constexpr int16_t LearnedTop = 236;
     constexpr int16_t ForgetTop = 258;
+    constexpr int16_t OverlayTop = 296;
+    constexpr int16_t EverywhereTop = 322;
+    constexpr int16_t CenterTop = 348;
+    constexpr int16_t OpacityTop = 374;
+    constexpr int16_t MinimapTop = 404;
+    constexpr int OpacityStep = 10;
     constexpr int16_t EffectLabelWidth = 96;
     constexpr int16_t LookPrevX = Pad + EffectLabelWidth;
     constexpr int16_t LookTextWidth = 96;
@@ -135,6 +144,9 @@ namespace {
         bool ShowEffects = true;
         int CorrectEffect = DefaultCorrectEffect;
         int TrapEffect = DefaultTrapEffect;
+        bool Overlay = true;
+        bool OverlayEverywhere = false;
+        MapOverlay::Options View;
     };
 
     struct Mark {
@@ -172,6 +184,7 @@ namespace {
     int PendingCredit = 0;
     ULONGLONG CreditTime = 0;
     std::atomic<bool> LearnedDirty{false};
+    std::atomic<bool> InRaid{false};
 
     struct LeverEffect {
         uint32_t Handle = 0;
@@ -192,7 +205,7 @@ namespace {
 
     struct EffectEditor {
         int* Value;
-        TEWLabel* Label = nullptr;
+        WidgetKit::EditBox Box{};
         std::wstring Shown;
     };
     bool EditorsChanged = false;
@@ -224,6 +237,21 @@ namespace {
     TEWLabel* LearnedLabel = nullptr;
     std::wstring LearnedText;
     bool PendingToggle = false;
+    TLBSWidget* OverlayBox = nullptr;
+    TLBSWidget* EverywhereBox = nullptr;
+    TLBSWidget* CenterBox = nullptr;
+    TLBSWidget* MinimapBox = nullptr;
+    TEWLabel* OpacityLabel = nullptr;
+    std::wstring OpacityText;
+
+    constexpr int16_t HelpWidth = 22;
+    const Color HelpColor(255, 150, 200, 255);
+    struct Help {
+        TEWGraphicButtonWidget* Hit;
+        std::vector<std::wstring> Lines;
+    };
+    std::vector<Help> Helps;
+    bool HintShown = false;
 
     std::filesystem::path IniPath() {
         wchar_t Exe[MAX_PATH]{};
@@ -252,6 +280,11 @@ namespace {
         Config.ShowEffects = ReadInt(L"ShowEffects", 1) != 0;
         Config.CorrectEffect = std::max(0, ReadInt(L"CorrectEffect", DefaultCorrectEffect));
         Config.TrapEffect = std::max(0, ReadInt(L"TrapEffect", DefaultTrapEffect));
+        Config.Overlay = ReadInt(L"Overlay", 1) != 0;
+        Config.OverlayEverywhere = ReadInt(L"OverlayEverywhere", 0) != 0;
+        Config.View.Center = ReadInt(L"OverlayCenter", 0) != 0;
+        Config.View.Opacity = std::clamp(ReadInt(L"OverlayOpacity", 60), OpacityStep, 100);
+        Config.View.Minimap = ReadInt(L"DrawnMinimap", 1) != 0;
         wchar_t Extra[512]{};
         GetPrivateProfileStringW(L"RaidHelper", L"ExtraBossVnums", L"", Extra, 512, IniPath().c_str());
         Config.ExtraBossVnums = Extra;
@@ -278,6 +311,11 @@ namespace {
         WriteValue(L"ShowEffects", Config.ShowEffects ? L"1" : L"0");
         WriteValue(L"CorrectEffect", std::to_wstring(Config.CorrectEffect));
         WriteValue(L"TrapEffect", std::to_wstring(Config.TrapEffect));
+        WriteValue(L"Overlay", Config.Overlay ? L"1" : L"0");
+        WriteValue(L"OverlayEverywhere", Config.OverlayEverywhere ? L"1" : L"0");
+        WriteValue(L"OverlayCenter", Config.View.Center ? L"1" : L"0");
+        WriteValue(L"OverlayOpacity", std::to_wstring(Config.View.Opacity));
+        WriteValue(L"DrawnMinimap", Config.View.Minimap ? L"1" : L"0");
     }
 
     std::filesystem::path LearnedPath() {
@@ -344,6 +382,7 @@ namespace {
 
     bool OnIn(const Packet::InPacket& Packet) {
         if (Packet.entityType == EntityType::Monster) {
+            MapOverlay::OnMonsterIn(Packet.entityID);
             std::lock_guard Lock(TargetLock);
             const bool Marked = (!Packet.fields.empty() && Packet.fields.back() == "1")
                                 || ExtraBosses.contains(Packet.entityVNum);
@@ -373,6 +412,7 @@ namespace {
     }
 
     bool OnRaidCounters(const Packet::RaidMbfPacket& Packet) {
+        InRaid = true;
         std::lock_guard Lock(TargetLock);
         if (LastLeversLeft >= 0 && Packet.leversLeft < LastLeversLeft) {
             PendingCredit += LastLeversLeft - Packet.leversLeft;
@@ -404,6 +444,7 @@ namespace {
 
     bool OnSkillUse(const Packet::SuPacket& Packet) {
         if (Packet.targetEntityType != EntityType::Monster || Packet.targetAlive) return true;
+        MapOverlay::OnMonsterDied(Packet.targetEntityID);
         std::lock_guard Lock(TargetLock);
         if (Targets.erase(Packet.targetEntityID)) Dirty = true;
         return true;
@@ -418,6 +459,8 @@ namespace {
     }
 
     bool OnMapChange(const Packet::CMapPacket&) {
+        InRaid = false;
+        MapOverlay::OnMapChange();
         std::lock_guard Lock(TargetLock);
         Targets.clear();
         LeverStates.clear();
@@ -836,10 +879,6 @@ namespace {
         return EffectCatalog::Ids().empty() ? Fallback : EffectCatalog::Ids();
     }
 
-    std::wstring LookText(const int Effect) {
-        return Effect <= 0 ? L"Off" : L"Look " + std::to_wstring(Effect);
-    }
-
     void StepLook(EffectEditor& Editor, const int Step) {
         const std::vector<int>& List = LookList();
         if (List.empty()) return;
@@ -886,15 +925,89 @@ namespace {
         Dirty = true;
     }
 
-    void AddEffectRow(EffectEditor& Editor, const int16_t Top, const wchar_t* Title) {
+    std::vector<MapOverlay::Mark> OverlayMarks() {
+        std::vector<MapOverlay::Mark> Marks;
+        std::lock_guard Lock(TargetLock);
+        for (const auto& [Id, Entry] : Targets) {
+            if (!Wanted(Entry.TargetKind)) continue;
+            if (Entry.TargetKind == Kind::Lever && !IsKnownCorrect(Entry.X, Entry.Y)) continue;
+            const MarkIcon& Icon = Icons[IconFor(Entry.TargetKind)];
+            Marks.push_back({Id, Entry.X, Entry.Y, Icon.Image, Icon.Frame, Icon.Width, Icon.Height,
+                             Entry.TargetKind == Kind::Boss});
+        }
+        return Marks;
+    }
+
+    std::unordered_set<long> LeverIds() {
+        std::unordered_set<long> Ids;
+        std::lock_guard Lock(TargetLock);
+        for (const auto& [Id, State] : LeverStates) Ids.insert(Id);
+        return Ids;
+    }
+
+    std::wstring OpacityLine() {
+        return L"Opacity " + std::to_wstring(Config.View.Opacity) + L"%";
+    }
+
+    void StepOpacity(const int Step) {
+        Config.View.Opacity = std::clamp(Config.View.Opacity + Step, OpacityStep, 100);
+        SetLabel(OpacityLabel, OpacityText, OpacityLine());
+        SaveSettings();
+    }
+
+    void __cdecl OnOpacityDown(void*) {
+        StepOpacity(-OpacityStep);
+    }
+
+    void __cdecl OnOpacityUp(void*) {
+        StepOpacity(OpacityStep);
+    }
+
+    TEWGraphicButtonWidget* AddHitArea(TLBSWidget* Parent, const int16_t X, const int16_t Y, const int16_t Width,
+                                       const int16_t Height) {
+        auto* Area = Widget::Create<TEWGraphicButtonWidget>(CachedHost);
+        if (!Area) return nullptr;
+        delete[] Area->imageData.atlasFrames;
+        Area->imageData.imageName = 1593835585;
+        Area->imageData.frameCount = 3;
+        Area->imageData.atlasFrames = new AtlasFrame[3]{{0, 0, 1, 1}, {0, 0, 1, 1}, {0, 0, 1, 1}};
+        Area->drawMode = 0;
+        Area->color = Color(0, 255, 255, 255);
+        Area->rect = {X, Y, static_cast<int16_t>(X + Width), static_cast<int16_t>(Y + Height)};
+        Attach(Parent, Area);
+        return Area;
+    }
+
+    bool Hovered(const TEWGraphicButtonWidget* Area) {
+        if (!Area || !Area->hovered) return false;
+        for (const TLBSWidget* At = Area; At; At = At->parent) {
+            if (!At->isVisible) return false;
+        }
+        return true;
+    }
+
+    void AddHelp(const int16_t X, const int16_t Y, std::vector<std::wstring> Lines) {
+        TEWLabel* Label = AddLabel(Window, X, static_cast<int16_t>(Y - TextNudge), HelpWidth, L"(?)");
+        if (Label) Label->textColor = HelpColor;
+        Helps.push_back({AddHitArea(Window, X, Y, HelpWidth, 15), std::move(Lines)});
+    }
+
+    int16_t AfterCheckbox(const wchar_t* Text) {
+        return static_cast<int16_t>(Pad + 15 + 4 + WidgetKit::MeasureText(1, Text) + 4);
+    }
+
+    void AddEffectRow(EffectEditor& Editor, const int16_t Top, const wchar_t* Title, std::vector<std::wstring> HelpLines) {
         AddLabel(Window, Pad, static_cast<int16_t>(Top + 4), EffectLabelWidth, Title);
+        AddHelp(static_cast<int16_t>(Pad + WidgetKit::MeasureText(1, Title) + 3), static_cast<int16_t>(Top + 4),
+                std::move(HelpLines));
         TEWGraphicButtonWidget* Prev = AddSpriteButton(Window, {{476, 71, 12, 19}, {476, 49, 12, 19}, {476, 71, 12, 19}},
                                                        &OnLookPrev, &Editor);
         Place(Prev, LookPrevX, static_cast<int16_t>(Top + 1), 12, 19);
-        Editor.Label = AddLabel(Window, static_cast<int16_t>(LookPrevX + 14), static_cast<int16_t>(Top + 4), LookTextWidth,
-                                LookText(*Editor.Value).c_str());
-        if (Editor.Label) Editor.Label->textAlignment = 3;
-        Editor.Shown = LookText(*Editor.Value);
+        Editor.Box = WidgetKit::CreateEditBox(CachedHost, static_cast<int16_t>(LookPrevX + 14), static_cast<int16_t>(Top - 1),
+                                              LookTextWidth, 22);
+        Attach(Window, Editor.Box.Frame);
+        Editor.Shown = std::to_wstring(*Editor.Value);
+        if (Editor.Box.Edit) Editor.Box.Edit->SetText(Editor.Shown.c_str());
         TEWGraphicButtonWidget* Next = AddSpriteButton(Window, {{495, 71, 12, 19}, {495, 49, 12, 19}, {495, 71, 12, 19}},
                                                        &OnLookNext, &Editor);
         Place(Next, static_cast<int16_t>(LookPrevX + 16 + LookTextWidth), static_cast<int16_t>(Top + 1), 12, 19);
@@ -912,18 +1025,94 @@ namespace {
         LeverBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, LeverTop, L"Levers", 70, &Config.ShowLevers,
                                                     &OnOptionChanged);
         Attach(Window, LeverBox);
+        AddHelp(AfterCheckbox(L"Levers"), LeverTop, {
+            L"Marks levers on the minimap, only ones learned as correct.",
+            L"A lever counts as correct when pulling it lowers the",
+            L"raid's lever counter; traps spawn monsters instead.",
+        });
         BossBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, BossTop, L"Bosses", 70, &Config.ShowBosses,
                                                    &OnOptionChanged);
         Attach(Window, BossBox);
+        AddHelp(AfterCheckbox(L"Bosses"), BossTop, {
+            L"Marks bosses and mini-bosses on the minimap",
+            L"until they die.",
+        });
         CountBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, CountTop, L"Count on the minimap", 200,
                                                     &Config.ShowCount, &OnOptionChanged);
         Attach(Window, CountBox);
+        AddHelp(AfterCheckbox(L"Count on the minimap"), CountTop, {
+            L"Shows above the minimap how many correct levers",
+            L"and bosses are left in this room.",
+        });
         EffectsBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, EffectsTop, L"Ground effect on known levers", 230,
                                                       &Config.ShowEffects, &OnOptionChanged);
         Attach(Window, EffectsBox);
-        AddEffectRow(CorrectEditor, CorrectEffectTop, L"Correct levers");
-        AddEffectRow(TrapEditor, TrapEffectTop, L"Trap levers");
-        AddBlueButton(Window, Pad, ForgetTop, L"Forget this room", &OnForgetRoom, nullptr);
+        AddHelp(AfterCheckbox(L"Ground effect on known levers"), EffectsTop, {
+            L"Plays an effect on the ground at levers already learned,",
+            L"so you can tell correct ones from traps in the world.",
+            L"Pick the two effects below.",
+        });
+        AddEffectRow(CorrectEditor, CorrectEffectTop, L"Correct levers", {
+            L"Effect the game plays on levers learned as correct.",
+            L"Type its id, or step through them with the arrows.",
+            L"Preview plays it on the nearest lever. 0 turns it off.",
+        });
+        AddEffectRow(TrapEditor, TrapEffectTop, L"Trap levers", {
+            L"Effect the game plays on levers learned as traps.",
+            L"Type its id, or step through them with the arrows.",
+            L"Preview plays it on the nearest lever. 0 turns it off.",
+        });
+        TEWGraphicButtonWidget* Forget = AddBlueButton(Window, Pad, ForgetTop, L"Forget this room", &OnForgetRoom, nullptr);
+        if (Forget) {
+            AddHelp(static_cast<int16_t>(Forget->rect.right + 4), static_cast<int16_t>(ForgetTop + 5), {
+                L"Forgets every lever learned in rooms of this size,",
+                L"correct and trap alike. Use it if a room was learned wrong.",
+            });
+        }
+        OverlayBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, OverlayTop, L"Map overlay (shows in raids)", 230,
+                                                      &Config.Overlay, &OnOptionChanged);
+        Attach(Window, OverlayBox);
+        AddHelp(AfterCheckbox(L"Map overlay (shows in raids)"), OverlayTop, {
+            L"A see-through map in the middle of the screen that",
+            L"turns on by itself when you enter a raid room.",
+            L"Clicks go through it. Red: monsters, gold: items,",
+            L"green: players, the arrow is you.",
+        });
+        EverywhereBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, EverywhereTop, L"Also outside raids", 230,
+                                                         &Config.OverlayEverywhere, &OnOptionChanged);
+        Attach(Window, EverywhereBox);
+        AddHelp(AfterCheckbox(L"Also outside raids"), EverywhereTop, {
+            L"Shows the map overlay on every map, not only in raids.",
+            L"Needs \"Map overlay\" on.",
+        });
+        CenterBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, CenterTop, L"Keep me in the middle", 230,
+                                                     &Config.View.Center, &OnOptionChanged);
+        Attach(Window, CenterBox);
+        AddHelp(AfterCheckbox(L"Keep me in the middle"), CenterTop, {
+            L"On: the map moves with you, so you stay in the middle",
+            L"of the screen. Off: the whole map stays centered.",
+        });
+        TEWGraphicButtonWidget* Down = AddSpriteButton(Window, {{476, 71, 12, 19}, {476, 49, 12, 19}, {476, 71, 12, 19}},
+                                                       &OnOpacityDown, nullptr);
+        Place(Down, Pad, static_cast<int16_t>(OpacityTop + 1), 12, 19);
+        OpacityLabel = AddLabel(Window, Pad + 14, static_cast<int16_t>(OpacityTop + 4), LookTextWidth, OpacityLine().c_str());
+        if (OpacityLabel) OpacityLabel->textAlignment = 3;
+        OpacityText = OpacityLine();
+        TEWGraphicButtonWidget* Up = AddSpriteButton(Window, {{495, 71, 12, 19}, {495, 49, 12, 19}, {495, 71, 12, 19}},
+                                                     &OnOpacityUp, nullptr);
+        Place(Up, static_cast<int16_t>(Pad + 16 + LookTextWidth), static_cast<int16_t>(OpacityTop + 1), 12, 19);
+        AddHelp(static_cast<int16_t>(Pad + 32 + LookTextWidth), static_cast<int16_t>(OpacityTop + 4), {
+            L"How solid the map overlay is. Markers always stay",
+            L"a bit more solid than the map so they stand out.",
+        });
+        MinimapBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, MinimapTop, L"Draw minimaps that have no picture", 260,
+                                                      &Config.View.Minimap, &OnOptionChanged);
+        Attach(Window, MinimapBox);
+        AddHelp(AfterCheckbox(L"Draw minimaps that have no picture"), MinimapTop, {
+            L"Some maps, many raid rooms among them, only have a",
+            L"placeholder picture on the top-right minimap.",
+            L"This draws their real walkable area there instead.",
+        });
         StatusLabel = AddLabel(Window, Pad, StatusTop, WindowWidth - 2 * Pad, L"");
         if (StatusLabel) StatusLabel->textColor = HintColor;
         StatusText.clear();
@@ -946,7 +1135,12 @@ namespace {
     void ForgetWindow() {
         Window = nullptr;
         LeverBox = BossBox = CountBox = EffectsBox = nullptr;
-        CorrectEditor.Label = TrapEditor.Label = nullptr;
+        OverlayBox = EverywhereBox = CenterBox = MinimapBox = nullptr;
+        OpacityLabel = nullptr;
+        OpacityText.clear();
+        Helps.clear();
+        HintShown = false;
+        CorrectEditor.Box = TrapEditor.Box = WidgetKit::EditBox{};
         CorrectEditor.Shown.clear();
         TrapEditor.Shown.clear();
         LeverPicker = BossPicker = nullptr;
@@ -979,6 +1173,7 @@ extern "C" {
         LoadSettings();
         LoadLearned();
         EffectCatalog::Load();
+        MapImage::StartPlaceholderScan();
         Packet::SubscribePacket(Host, &OnIn);
         Packet::SubscribePacket(Host, &OnMove);
         Packet::SubscribePacket(Host, &OnSkillUse);
@@ -998,6 +1193,9 @@ extern "C" {
         }
         if (LearnedDirty.exchange(false)) SaveLearned();
         ClearEffects();
+        MapOverlay::Remove(CachedHost);
+        MapImage::StopPlaceholderScan();
+        GameHint::Destroy();
         if (MiniMap && IsRootChild(AttachedRoot, MiniMap)) {
             Detach(Container);
             Detach(CountLabel);
@@ -1022,6 +1220,8 @@ extern "C" {
         if (Root != AttachedRoot) {
             ForgetMarks();
             ForgetWindow();
+            MapOverlay::Forget();
+            GameHint::Destroy();
             AttachedRoot = Root;
             CreateSettingsWindow(Root);
         }
@@ -1053,6 +1253,10 @@ extern "C" {
         LastPlayerX = tickContext.playerX;
         LastPlayerY = tickContext.playerY;
         SyncEffects();
+        const bool OverlayOn = Config.Overlay && (InRaid || Config.OverlayEverywhere);
+        MapOverlay::Tick(CachedHost, Root, tickContext, OverlayOn, Config.View,
+                         OverlayOn ? OverlayMarks() : std::vector<MapOverlay::Mark>{},
+                         OverlayOn ? LeverIds() : std::unordered_set<long>{});
 
         if (!Window) {
             CachedHost->ReportStatus(ModHealthLevel::Broken, "Couldn't create the settings window.");
@@ -1074,14 +1278,43 @@ extern "C" {
             Show(Window, Open);
             if (Open) Window->BubbleUp();
         }
-        if (!Window->isVisible) return;
-
-        if (EditorsChanged) {
-            EditorsChanged = false;
-            for (EffectEditor* Editor : {&CorrectEditor, &TrapEditor}) {
-                SetLabel(Editor->Label, Editor->Shown, LookText(*Editor->Value));
+        const std::vector<std::wstring>* HelpLines = nullptr;
+        if (Window->isVisible) {
+            for (const Help& Entry : Helps) {
+                if (Hovered(Entry.Hit)) HelpLines = &Entry.Lines;
             }
         }
+        if (HelpLines) {
+            if (GameHint::Create(CachedHost, Root)) GameHint::Show(*HelpLines, tickContext.mouseX, tickContext.mouseY);
+            HintShown = true;
+        } else if (HintShown) {
+            GameHint::Hide();
+            HintShown = false;
+        }
+        if (!Window->isVisible) return;
+
+        for (EffectEditor* Editor : {&CorrectEditor, &TrapEditor}) {
+            if (!Editor->Box.Edit) continue;
+            if (EditorsChanged) {
+                Editor->Shown = std::to_wstring(*Editor->Value);
+                Editor->Box.Edit->SetText(Editor->Shown.c_str());
+                continue;
+            }
+            const std::wstring Typed = Editor->Box.Edit->GetText();
+            if (Typed == Editor->Shown) continue;
+            Editor->Shown = Typed;
+            try {
+                size_t Used = 0;
+                const int Effect = Typed.empty() ? -1 : std::stoi(Typed, &Used);
+                const std::vector<int>& Known = LookList();
+                const bool Real = Effect == 0 || std::binary_search(Known.begin(), Known.end(), Effect);
+                if (Used == Typed.size() && Real && Effect != *Editor->Value) {
+                    *Editor->Value = Effect;
+                    SaveSettings();
+                }
+            } catch (const std::exception&) {}
+        }
+        EditorsChanged = false;
 
         std::wstring Status;
         if (!HaveMiniMap) {
