@@ -407,11 +407,16 @@ namespace {
         if (Context.mapId < 0 || Context.mapWidth <= 0 || Now - SeenRoomAt < RoomSettleMs) return;
         if (Took.contains(Context.mapId) || BySize.empty()) return;
         Took.insert(Context.mapId);
-        for (const auto& [Key, Record] : BySize) {
-            if (std::get<0>(Key) != Context.mapWidth || std::get<1>(Key) != Context.mapHeight) continue;
+        for (auto It = BySize.begin(); It != BySize.end();) {
+            const auto& [Key, Record] = *It;
+            if (std::get<0>(Key) != Context.mapWidth || std::get<1>(Key) != Context.mapHeight) {
+                ++It;
+                continue;
+            }
             LeverRecord& Into = Learned[{Context.mapId, std::get<2>(Key), std::get<3>(Key)}];
             Into.Good += Record.Good;
             Into.Bad += Record.Bad;
+            It = BySize.erase(It);
         }
         LearnedDirty = true;
         Dirty = true;
@@ -1412,6 +1417,13 @@ extern "C" {
                 KnownLevers++;
                 KnownRooms.insert(std::get<0>(Key));
             }
+            std::set<std::pair<int, int>> WaitingRooms;
+            for (const auto& [Key, Record] : BySize) {
+                if (Record.Good <= Record.Bad) continue;
+                KnownLevers++;
+                WaitingRooms.insert({std::get<0>(Key), std::get<1>(Key)});
+            }
+            for (const auto& Room : WaitingRooms) KnownRooms.insert(-1 - Room.first * 10000 - Room.second);
         }
         SetLabel(LearnedLabel, LearnedText, L"Learned: " + std::to_wstring(KnownLevers) + L" correct levers in "
                                              + std::to_wstring(KnownRooms.size())
