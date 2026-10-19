@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <mutex>
 #include <tuple>
 #include <sstream>
@@ -163,7 +164,8 @@ namespace {
     std::unordered_set<int> ExtraBosses;
     std::atomic<bool> Dirty{true};
 
-    using LeverKey = std::tuple<int, int, int, int>;
+    using LeverKey = std::tuple<int, int, int>;
+    using SizeKey = std::tuple<int, int, int, int>;
     struct LeverRecord {
         int Good = 0;
         int Bad = 0;
@@ -173,6 +175,8 @@ namespace {
         int Y;
     };
     std::map<LeverKey, LeverRecord> Learned;
+    std::map<SizeKey, LeverRecord> BySize;
+    std::set<int> Took;
     std::unordered_map<long, int> LeverStates;
     std::unordered_set<long> RemovedObjects;
     bool HasLateFlip = false;
@@ -180,6 +184,10 @@ namespace {
     ULONGLONG LateFlipTime = 0;
     int RoomWidth = -1;
     int RoomHeight = -1;
+    int RoomMap = -1;
+    std::tuple<int, int, int> SeenRoom{-1, -1, -1};
+    ULONGLONG SeenRoomAt = 0;
+    constexpr ULONGLONG RoomSettleMs = 1000;
     int LastLeversLeft = -1;
     int PendingCredit = 0;
     ULONGLONG CreditTime = 0;
@@ -324,18 +332,49 @@ namespace {
 
     void LoadLearned() {
         std::map<LeverKey, LeverRecord> Loaded;
+        std::map<SizeKey, LeverRecord> LoadedSizes;
+        std::set<int> LoadedTook;
         std::ifstream File(LearnedPath());
-        int Width, Height, X, Y, Good, Bad;
-        while (File >> Width >> Height >> X >> Y >> Good >> Bad) Loaded[{Width, Height, X, Y}] = {Good, Bad};
+        std::string Line;
+        while (std::getline(File, Line)) {
+            std::istringstream Words(Line);
+            std::string First;
+            if (!(Words >> First)) continue;
+            int A, B, C, D, E;
+            if (First == "map") {
+                if (Words >> A >> B >> C >> D >> E) Loaded[{A, B, C}] = {D, E};
+            } else if (First == "took") {
+                if (Words >> A) LoadedTook.insert(A);
+            } else if (First == "size") {
+                int F;
+                if (Words >> A >> B >> C >> D >> E >> F) LoadedSizes[{A, B, C, D}] = {E, F};
+            } else {
+                try {
+                    A = std::stoi(First);
+                } catch (const std::exception&) {
+                    continue;
+                }
+                if (Words >> B >> C >> D >> E) {
+                    int F;
+                    if (Words >> F) LoadedSizes[{A, B, C, D}] = {E, F};
+                }
+            }
+        }
         std::lock_guard Lock(TargetLock);
         Learned = std::move(Loaded);
+        BySize = std::move(LoadedSizes);
+        Took = std::move(LoadedTook);
     }
 
     void SaveLearned() {
         std::map<LeverKey, LeverRecord> Copy;
+        std::map<SizeKey, LeverRecord> Sizes;
+        std::set<int> Taken;
         {
             std::lock_guard Lock(TargetLock);
             Copy = Learned;
+            Sizes = BySize;
+            Taken = Took;
         }
         std::error_code Error;
         std::filesystem::create_directories(LearnedPath().parent_path(), Error);
@@ -344,29 +383,55 @@ namespace {
             std::ofstream File(Temp, std::ios::trunc);
             if (!File) return;
             for (const auto& [Key, Record] : Copy) {
-                File << std::get<0>(Key) << ' ' << std::get<1>(Key) << ' ' << std::get<2>(Key) << ' ' << std::get<3>(Key) << ' '
+                File << "map " << std::get<0>(Key) << ' ' << std::get<1>(Key) << ' ' << std::get<2>(Key) << ' '
                      << Record.Good << ' ' << Record.Bad << '\n';
+            }
+            for (const int Map : Taken) File << "took " << Map << '\n';
+            for (const auto& [Key, Record] : Sizes) {
+                File << "size " << std::get<0>(Key) << ' ' << std::get<1>(Key) << ' ' << std::get<2>(Key) << ' '
+                     << std::get<3>(Key) << ' ' << Record.Good << ' ' << Record.Bad << '\n';
             }
             if (!File) return;
         }
         std::filesystem::rename(Temp, LearnedPath(), Error);
     }
 
+    void AdoptSizeLevers(const TickContext& Context) {
+        const std::tuple<int, int, int> Room{Context.mapId, Context.mapWidth, Context.mapHeight};
+        const ULONGLONG Now = GetTickCount64();
+        if (Room != SeenRoom) {
+            SeenRoom = Room;
+            SeenRoomAt = Now;
+            return;
+        }
+        if (Context.mapId < 0 || Context.mapWidth <= 0 || Now - SeenRoomAt < RoomSettleMs) return;
+        if (Took.contains(Context.mapId) || BySize.empty()) return;
+        Took.insert(Context.mapId);
+        for (const auto& [Key, Record] : BySize) {
+            if (std::get<0>(Key) != Context.mapWidth || std::get<1>(Key) != Context.mapHeight) continue;
+            LeverRecord& Into = Learned[{Context.mapId, std::get<2>(Key), std::get<3>(Key)}];
+            Into.Good += Record.Good;
+            Into.Bad += Record.Bad;
+        }
+        LearnedDirty = true;
+        Dirty = true;
+    }
+
     bool IsKnownCorrect(const int X, const int Y) {
-        if (RoomWidth <= 0 || RoomHeight <= 0) return false;
-        const auto Found = Learned.find({RoomWidth, RoomHeight, X, Y});
+        if (RoomMap < 0) return false;
+        const auto Found = Learned.find({RoomMap, X, Y});
         return Found != Learned.end() && Found->second.Good > 0 && Found->second.Good >= Found->second.Bad;
     }
 
     bool IsKnownTrap(const int X, const int Y) {
-        if (RoomWidth <= 0 || RoomHeight <= 0) return false;
-        const auto Found = Learned.find({RoomWidth, RoomHeight, X, Y});
+        if (RoomMap < 0) return false;
+        const auto Found = Learned.find({RoomMap, X, Y});
         return Found != Learned.end() && Found->second.Bad > Found->second.Good;
     }
 
     void LearnPull(const Position& Lever, const bool AllowTrap) {
-        if (RoomWidth <= 0 || RoomHeight <= 0) return;
-        const LeverKey Key{RoomWidth, RoomHeight, Lever.X, Lever.Y};
+        if (RoomMap < 0) return;
+        const LeverKey Key{RoomMap, Lever.X, Lever.Y};
         LeverRecord& Record = Learned[Key];
         if (PendingCredit > 0 && GetTickCount64() - CreditTime <= CreditWindowMs) {
             PendingCredit--;
@@ -912,9 +977,9 @@ namespace {
     void __cdecl OnForgetRoom(void*) {
         {
             std::lock_guard Lock(TargetLock);
-            if (RoomWidth <= 0 || RoomHeight <= 0) return;
+            if (RoomMap < 0) return;
             for (auto It = Learned.begin(); It != Learned.end();) {
-                if (std::get<0>(It->first) == RoomWidth && std::get<1>(It->first) == RoomHeight) {
+                if (std::get<0>(It->first) == RoomMap) {
                     It = Learned.erase(It);
                 } else {
                     ++It;
@@ -1065,8 +1130,8 @@ namespace {
         TEWGraphicButtonWidget* Forget = AddBlueButton(Window, Pad, ForgetTop, L"Forget this room", &OnForgetRoom, nullptr);
         if (Forget) {
             AddHelp(static_cast<int16_t>(Forget->rect.right + 4), static_cast<int16_t>(ForgetTop + 5), {
-                L"Forgets every lever learned in rooms of this size,",
-                L"correct and trap alike. Use it if a room was learned wrong.",
+                L"Forgets every lever learned in this room,",
+                L"correct and trap alike. Use it if it was learned wrong.",
             });
         }
         OverlayBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, OverlayTop, L"Map overlay (shows in raids)", 230,
@@ -1229,11 +1294,13 @@ extern "C" {
         if (LearnedDirty.exchange(false)) SaveLearned();
         {
             std::lock_guard Lock(TargetLock);
-            if (RoomWidth != tickContext.mapWidth || RoomHeight != tickContext.mapHeight) {
+            if (RoomWidth != tickContext.mapWidth || RoomHeight != tickContext.mapHeight || RoomMap != tickContext.mapId) {
                 RoomWidth = tickContext.mapWidth;
                 RoomHeight = tickContext.mapHeight;
+                RoomMap = tickContext.mapId;
                 Dirty = true;
             }
+            AdoptSizeLevers(tickContext);
         }
 
         const bool HaveMiniMap = EnsureContainer(Root);
@@ -1343,7 +1410,7 @@ extern "C" {
             for (const auto& [Key, Record] : Learned) {
                 if (Record.Good <= Record.Bad) continue;
                 KnownLevers++;
-                KnownRooms.insert(std::get<0>(Key) * 100000 + std::get<1>(Key));
+                KnownRooms.insert(std::get<0>(Key));
             }
         }
         SetLabel(LearnedLabel, LearnedText, L"Learned: " + std::to_wstring(KnownLevers) + L" correct levers in "
