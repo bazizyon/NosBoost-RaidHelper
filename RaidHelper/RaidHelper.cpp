@@ -18,6 +18,8 @@
 #include "OutPacket.h"
 #include "CMapPacket.h"
 #include "RaidMbfPacket.h"
+#include "DropPacket.h"
+#include "ThrowPacket.h"
 #include "GroundEffects.h"
 #include "EffectCatalog.h"
 #include "MapImage.h"
@@ -81,7 +83,7 @@ namespace {
     constexpr int DefaultBossIcon = 2;
 
     constexpr uint16_t WindowWidth = 350;
-    constexpr uint16_t WindowHeight = 450;
+    constexpr uint16_t WindowHeight = 476;
     constexpr int16_t Pad = 14;
     constexpr int16_t TextNudge = -1;
     constexpr int16_t DropdownArrow = 17;
@@ -99,6 +101,8 @@ namespace {
     constexpr int16_t CenterTop = 348;
     constexpr int16_t OpacityTop = 374;
     constexpr int16_t MinimapTop = 404;
+    constexpr int16_t ThrowTop = 430;
+    constexpr long NoOwner = -1;
     constexpr int OpacityStep = 10;
     constexpr int16_t EffectLabelWidth = 96;
     constexpr int16_t LookPrevX = Pad + EffectLabelWidth;
@@ -147,6 +151,7 @@ namespace {
         int TrapEffect = DefaultTrapEffect;
         bool Overlay = true;
         bool OverlayEverywhere = false;
+        bool LandLoot = false;
         MapOverlay::Options View;
     };
 
@@ -249,6 +254,8 @@ namespace {
     TLBSWidget* EverywhereBox = nullptr;
     TLBSWidget* CenterBox = nullptr;
     TLBSWidget* MinimapBox = nullptr;
+    TLBSWidget* LandBox = nullptr;
+    std::atomic<bool> LandLootOn{false};
     TEWLabel* OpacityLabel = nullptr;
     std::wstring OpacityText;
 
@@ -290,6 +297,8 @@ namespace {
         Config.TrapEffect = std::max(0, ReadInt(L"TrapEffect", DefaultTrapEffect));
         Config.Overlay = ReadInt(L"Overlay", 1) != 0;
         Config.OverlayEverywhere = ReadInt(L"OverlayEverywhere", 0) != 0;
+        Config.LandLoot = ReadInt(L"LandLoot", 0) != 0;
+        LandLootOn = Config.LandLoot;
         Config.View.Center = ReadInt(L"OverlayCenter", 0) != 0;
         Config.View.Opacity = std::clamp(ReadInt(L"OverlayOpacity", 60), OpacityStep, 100);
         Config.View.Minimap = ReadInt(L"DrawnMinimap", 1) != 0;
@@ -321,6 +330,8 @@ namespace {
         WriteValue(L"TrapEffect", std::to_wstring(Config.TrapEffect));
         WriteValue(L"Overlay", Config.Overlay ? L"1" : L"0");
         WriteValue(L"OverlayEverywhere", Config.OverlayEverywhere ? L"1" : L"0");
+        WriteValue(L"LandLoot", Config.LandLoot ? L"1" : L"0");
+        LandLootOn = Config.LandLoot;
         WriteValue(L"OverlayCenter", Config.View.Center ? L"1" : L"0");
         WriteValue(L"OverlayOpacity", std::to_wstring(Config.View.Opacity));
         WriteValue(L"DrawnMinimap", Config.View.Minimap ? L"1" : L"0");
@@ -479,6 +490,20 @@ namespace {
             if (Targets.erase(Packet.entityID)) Dirty = true;
         }
         return true;
+    }
+
+    bool OnThrow(const Packet::ThrowPacket& Packet) {
+        if (!LandLootOn || !CachedHost) return true;
+        Packet::DropPacket Landed;
+        Landed.itemVNum = Packet.itemVNum;
+        Landed.dropID = Packet.dropID;
+        Landed.xPos = Packet.xPos;
+        Landed.yPos = Packet.yPos;
+        Landed.amount = Packet.amount;
+        Landed.isQuestItem = 0;
+        Landed.ownerID = NoOwner;
+        Packet::InjectReceivePacket(CachedHost, Landed);
+        return false;
     }
 
     bool OnRaidCounters(const Packet::RaidMbfPacket& Packet) {
@@ -1081,6 +1106,7 @@ namespace {
         const WidgetKit::WindowDesc Desc{WidgetKit::WindowStyle::Plain, 240, 140, WindowWidth, WindowHeight,
                                          L"Raid Helper", true};
         Window = WidgetKit::CreateGameWindow(CachedHost, Desc);
+        WidgetKit::CloseOnEscape(CachedHost, Window);
         if (!Window) return;
         Window->isVisible = false;
         Window->isRestrictedToScreen = true;
@@ -1171,10 +1197,18 @@ namespace {
         MinimapBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, MinimapTop, L"Draw minimaps that have no picture", 260,
                                                       &Config.View.Minimap, &OnOptionChanged);
         Attach(Window, MinimapBox);
+        LandBox = WidgetKit::CreateLabeledCheckbox(CachedHost, Pad, ThrowTop, L"Boss loot lands at once", 230,
+                                                   &Config.LandLoot, &OnOptionChanged);
+        Attach(Window, LandBox);
         AddHelp(AfterCheckbox(L"Draw minimaps that have no picture"), MinimapTop, {
             L"Some maps, many raid rooms among them, only have a",
             L"placeholder picture on the top-right minimap.",
             L"This draws their real walkable area there instead.",
+        });
+        AddHelp(AfterCheckbox(L"Boss loot lands at once"), ThrowTop, {
+            L"Bosses throw their loot through the air. With this on,",
+            L"it lies where it lands right away, so it is easy to",
+            L"click. Only your game sees it this way.",
         });
         StatusLabel = AddLabel(Window, Pad, StatusTop, WindowWidth - 2 * Pad, L"");
         if (StatusLabel) StatusLabel->textColor = HintColor;
@@ -1198,7 +1232,7 @@ namespace {
     void ForgetWindow() {
         Window = nullptr;
         LeverBox = BossBox = CountBox = EffectsBox = nullptr;
-        OverlayBox = EverywhereBox = CenterBox = MinimapBox = nullptr;
+        OverlayBox = EverywhereBox = CenterBox = MinimapBox = LandBox = nullptr;
         OpacityLabel = nullptr;
         OpacityText.clear();
         Helps.clear();
@@ -1243,6 +1277,7 @@ extern "C" {
         Packet::SubscribePacket(Host, &OnOut);
         Packet::SubscribePacket(Host, &OnMapChange);
         Packet::SubscribePacket(Host, &OnRaidCounters);
+        Packet::SubscribePacket(Host, &OnThrow);
     }
 
     __declspec(dllexport) void ModShutdown() {
@@ -1253,6 +1288,7 @@ extern "C" {
             Packet::UnsubscribePacket(CachedHost, &OnOut);
             Packet::UnsubscribePacket(CachedHost, &OnMapChange);
             Packet::UnsubscribePacket(CachedHost, &OnRaidCounters);
+            Packet::UnsubscribePacket(CachedHost, &OnThrow);
         }
         if (LearnedDirty.exchange(false)) SaveLearned();
         ClearEffects();
