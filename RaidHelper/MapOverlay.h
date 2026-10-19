@@ -28,7 +28,7 @@ namespace MapOverlay {
     void OnMonsterIn(long Id);
 
     void Tick(const ModHost* Host, TLBSWidget* Root, const TickContext& Context, bool Visible, const Options& Settings,
-              const std::vector<Mark>& Marks, const std::unordered_set<long>& NotItems);
+              const std::vector<Mark>& Marks);
     void Forget();
     void Remove(const ModHost* Host);
 }

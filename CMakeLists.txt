@@ -29,6 +29,7 @@ add_library(RaidHelper SHARED
         RaidHelper/MapOverlay.cpp
         RaidHelper/GameCall.cpp
         RaidHelper/GameHint.cpp
+        RaidHelper/ItemCatalog.cpp
         WidgetKit/WidgetKit.cpp
         WidgetKit/Dropdown.cpp
         ${imgui_SOURCE_DIR}/imgui.cpp

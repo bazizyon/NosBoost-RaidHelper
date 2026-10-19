@@ -405,7 +405,7 @@ namespace {
             return;
         }
         if (Context.mapId < 0 || Context.mapWidth <= 0 || Now - SeenRoomAt < RoomSettleMs) return;
-        if (Took.contains(Context.mapId) || BySize.empty()) return;
+        if (Took.contains(Context.mapId) || BySize.empty() || LeverStates.empty()) return;
         Took.insert(Context.mapId);
         for (auto It = BySize.begin(); It != BySize.end();) {
             const auto& [Key, Record] = *It;
@@ -1008,13 +1008,6 @@ namespace {
         return Marks;
     }
 
-    std::unordered_set<long> LeverIds() {
-        std::unordered_set<long> Ids;
-        std::lock_guard Lock(TargetLock);
-        for (const auto& [Id, State] : LeverStates) Ids.insert(Id);
-        return Ids;
-    }
-
     std::wstring OpacityLine() {
         return L"Opacity " + std::to_wstring(Config.View.Opacity) + L"%";
     }
@@ -1327,8 +1320,7 @@ extern "C" {
         SyncEffects();
         const bool OverlayOn = Config.Overlay && (InRaid || Config.OverlayEverywhere);
         MapOverlay::Tick(CachedHost, Root, tickContext, OverlayOn, Config.View,
-                         OverlayOn ? OverlayMarks() : std::vector<MapOverlay::Mark>{},
-                         OverlayOn ? LeverIds() : std::unordered_set<long>{});
+                         OverlayOn ? OverlayMarks() : std::vector<MapOverlay::Mark>{});
 
         if (!Window) {
             CachedHost->ReportStatus(ModHealthLevel::Broken, "Couldn't create the settings window.");

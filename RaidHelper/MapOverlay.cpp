@@ -3,6 +3,7 @@
 
 #include "MapOverlay.h"
 #include "MapImage.h"
+#include "ItemCatalog.h"
 #include "Memory.h"
 #include "TLBSWidget.h"
 
@@ -44,12 +45,29 @@ namespace MapOverlay {
         constexpr uint32_t ObjectId = 0x08;
         constexpr uint32_t ObjectWorldX = 0x58;
         constexpr uint32_t ObjectWorldY = 0x60;
+        constexpr uint32_t ItemObjectVnum = 0xC8;
+        constexpr int GoldVnum = 1046;
 
         struct Spot {
             long Id;
             float X;
             float Y;
+            int Vnum = 0;
         };
+
+        bool CatalogLoaded = false;
+        bool CatalogTried = false;
+        std::unordered_set<int> MapObjects;
+
+        void LoadCatalog() {
+            if (CatalogLoaded || CatalogTried) return;
+            CatalogTried = true;
+            if (!ItemCatalog::Load()) return;
+            CatalogLoaded = true;
+            for (const auto& Item : ItemCatalog::All()) {
+                if (Item.MapObject && Item.Vnum != GoldVnum) MapObjects.insert(Item.Vnum);
+            }
+        }
 
         uintptr_t SceneHolder = 0;
         bool SceneSearched = false;
@@ -155,7 +173,11 @@ namespace MapOverlay {
             return true;
         }
 
-        std::vector<Spot> ReadList(const uintptr_t Manager, const uint32_t Offset) {
+        bool IsLoot(const Spot& Item) {
+            return !MapObjects.contains(Item.Vnum);
+        }
+
+        std::vector<Spot> ReadList(const uintptr_t Manager, const uint32_t Offset, const bool WithVnum = false) {
             std::vector<Spot> Found;
             uintptr_t List = 0, Items = 0;
             int32_t Count = 0;
@@ -168,7 +190,10 @@ namespace MapOverlay {
             Found.reserve(Objects.size());
             for (const uintptr_t Object : Objects) {
                 Spot Entry{};
-                if (Object && ReadObject(Object, Entry)) Found.push_back(Entry);
+                if (!Object || !ReadObject(Object, Entry)) continue;
+                uint16_t Vnum = 0;
+                if (WithVnum && Memory::Read(Object + ItemObjectVnum, Vnum)) Entry.Vnum = Vnum;
+                Found.push_back(Entry);
             }
             return Found;
         }
@@ -354,6 +379,7 @@ namespace MapOverlay {
 
     void OnMapChange() {
         GridDirty = true;
+        CatalogTried = false;
         std::lock_guard Lock(DeadLock);
         Dead.clear();
     }
@@ -369,7 +395,7 @@ namespace MapOverlay {
     }
 
     void Tick(const ModHost* Host, TLBSWidget* Root, const TickContext& Context, const bool Visible,
-              const Options& Settings, const std::vector<Mark>& Marks, const std::unordered_set<long>& NotItems) {
+              const Options& Settings, const std::vector<Mark>& Marks) {
         if (!Host || !Root || !Root->childrenList || !Host->LoadUiImage) return;
         if (!EnsureWidgets(Host, Root)) return;
         const int ScreenWidth = Root->rect.right - Root->rect.left;
@@ -430,7 +456,9 @@ namespace MapOverlay {
             NotMobs.insert(Dead.begin(), Dead.end());
         }
         const std::vector<Spot> MonsterSpots = Manager ? ReadList(Manager, SceneMonsters) : std::vector<Spot>{};
-        const std::vector<Spot> ItemSpots = Manager ? ReadList(Manager, SceneItems) : std::vector<Spot>{};
+        LoadCatalog();
+        std::vector<Spot> ItemSpots = Manager ? ReadList(Manager, SceneItems, true) : std::vector<Spot>{};
+        std::erase_if(ItemSpots, [](const Spot& Item) { return !IsLoot(Item); });
         const std::vector<Spot> PlayerSpots = Manager ? ReadList(Manager, ScenePlayers) : std::vector<Spot>{};
         std::unordered_map<long, Spot> MonsterById;
         for (const Spot& Entry : MonsterSpots) MonsterById[Entry.Id] = Entry;
@@ -440,7 +468,7 @@ namespace MapOverlay {
         const AtlasFrame DotFrame{MapImage::DotLeft, 0, MapImage::DotSize, MapImage::DotSize};
         const AtlasFrame DiamondFrame{MapImage::DiamondLeft, 0, MapImage::DotSize, MapImage::DotSize};
         DrawDots(Host, MonsterPool, MonsterSpots, NotMobs, View, DotFrame, MonsterShown, WithAlpha(MonsterTint, MarkAlpha));
-        DrawDots(Host, ItemPool, ItemSpots, NotItems, View, DiamondFrame, ItemShown, WithAlpha(ItemTint, MarkAlpha));
+        DrawDots(Host, ItemPool, ItemSpots, {}, View, DiamondFrame, ItemShown, WithAlpha(ItemTint, MarkAlpha));
         DrawDots(Host, PlayerPool, PlayerSpots, OnlyMe, View, DotFrame, PlayerShown, WithAlpha(PlayerTint, MarkAlpha));
         for (const Mark& Target : Marks) {
             float X = static_cast<float>(Target.X), Y = static_cast<float>(Target.Y);
